@@ -234,7 +234,7 @@ def initialize_psrfits(outname, nsamps, nchans, nifs, nbits, npsub=-1,
         fits.Column(name="DAT_WTS" , format='%dE'%nchans, array=dat_wts),
         fits.Column(name="DAT_OFFS", format='%dE'%nchans, array=dat_offs),
         fits.Column(name="DAT_SCL" , format='%dE'%nchans, array=dat_scl),
-        fits.Column(name="DATA"    , format=str(nifs*nchans*n_per_subint*nbits/8) + 'B', 
+        fits.Column(name="DATA"    , format=str(nifs*nchans*n_per_subint) + 'E', 
                     dim='(%d,%d,%d)' %(nchans, nifs, n_per_subint), array=data),
     ]
 
@@ -324,11 +324,11 @@ def convert_fil2psrfits(filfile, outname, npsub=-1):
         isub = istop - istart  
         
         # Read in nread samples from filfile
-        nread = isub * nchans * nifs * npsub 
-        dd = np.fromfile(f, dtype='uint8', count=nread)
+        dd = np.fromfile(f, dtype='<f32', count=nread)
         dd = np.reshape(dd, (isub, npsub, nifs, nchans))
 
         # Put data in hdu data array
+	print(hdu.data.dtype)
         hdu.data[istart : istop]['data'] = dd[:]
 
         # Write to file
@@ -358,20 +358,37 @@ def get_min_max_freqs(hd):
     return fmin, fmax
 
 
+def get_good_mjdstart(mjds, dt, ftol=0.01):
+    mjd_min = np.min(mjds)
+    # offsets in seconds
+    offs = (mjds - mjd_min) * 3600.0 * 24.0 
+    # offsets in samples
+    samp_offs = offs / dt
+    # fractional offsets in samples 
+    fsamp_offs = samp_offs - np.round( samp_offs )
+    # Check tolerance
+    if np.any( fsamp_offs > ftol ):
+        retval = -1
+    else:
+        retval = mjd_min
+    return retval
+
+
+def start_pads(mjds, mjd_start, dt):
+    """
+    Calculate the number of time samples 
+    we need to pad 
+    """
+    off_sec = (mjds - mjd_start) * 3600 * 24
+    off_samps = np.round( off_sec / dt ).astype('int')
+    return off_samps
+    
+
 def check_headers_and_get_info(hd_list):
     hd_out = {}
 
     # -- consistency checks -- 
     err_code = 0
-
-    # nsamps
-    nsamps_arr = np.array([ hd['nspec'] for hd in hd_list ])
-    if len(np.unique(nsamps_arr)) > 1:
-        print("Multiple nsamps values found!")
-        err_code += 10**0
-    else: 
-	hd_out['nspec'] = np.unique(nsamps_arr)[0]
-        
 
     # nifs
     nifs_arr = np.array([ hd['nifs'] for hd in hd_list ])
@@ -386,16 +403,9 @@ def check_headers_and_get_info(hd_list):
     if len(np.unique(nbits_arr)) > 1:
         print("Multiple nbits values found!")
         err_code += 10**2
+        print(np.unique(nbits_arr))
     else: 
 	hd_out['nbits'] = np.unique(nbits_arr)[0]
-
-    # mjd_starts
-    mjd_arr = np.array([ hd['tstart'] for hd in hd_list ])
-    if len(np.unique(mjd_arr)) > 1:
-        print("Multiple mjd_start values found!")
-        err_code += 10**3
-    else: 
-	hd_out['tstart'] = np.unique(mjd_arr)[0]
 
     # time resolution
     dt_arr = np.array([ hd['tsamp'] for hd in hd_list ])
@@ -437,6 +447,34 @@ def check_headers_and_get_info(hd_list):
     else: 
 	hd_out['src_raj'] = np.unique(ra_vals)[0]
 
+    # mjd_starts
+    mjd_arr = np.array([ hd['tstart'] for hd in hd_list ])
+    if len(np.unique(mjd_arr)) > 1:
+        print("Multiple mjd_start values found!")
+        mjd_start = get_good_mjdstart(mjd_arr, dt_arr[0])
+        print(mjd_arr)
+        print(mjd_start)
+        if mjd_start < 0:
+            err_code += 10**3
+            print("Non-integer number of samps between mjd_stars!")
+            print(np.unique(mjd_arr))
+        else:
+            hd_out['tstart'] = mjd_start
+    else: 
+	hd_out['tstart'] = np.unique(mjd_arr)[0]
+
+    # nsamps
+    nsamps_arr = np.array([ hd['nspec'] for hd in hd_list ])
+    if len(np.unique(nsamps_arr)) > 1:
+        print("Multiple nsamps values found!")
+        start_sec = (mjd_arr - np.floor(mjd_arr)) * 3600 * 24.
+        stop_sec  = start_sec + nsamps_arr * dt_arr[0]
+        nsamp = ( np.max(stop_sec) - np.min(start_sec) ) / dt_arr[0]
+        #err_code += 10**0
+        hd_out['nspec'] = int( np.round(nsamp) )
+    else: 
+	hd_out['nspec'] = np.unique(nsamps_arr)[0]
+        
     # min / max freqs
     min_freqs = []
     max_freqs = []
@@ -495,11 +533,21 @@ def combine_convert_fil2psrfits(filfiles, outname, npsub=-1, maxpol=4):
     src_raj   = hd['src_raj']
     src_dej   = hd['src_dej']
 
+    # Hardcoded for now, output is 32 bit floats
+    inbits = nbits
+    outbits = 32
+
     # Arrays
     fch1s   = hd['fch1s']
     foffs   = hd['foffs']
     nchan_vals  = hd['nchans']
     hdr_sizes   = hd['hdr_sizes'] 
+    
+    mjds = np.array([ hd_ii['tstart'] for hd_ii in hd_list ])
+    pads = start_pads(mjds, hd['tstart'], hd['tsamp'])
+
+    print(mjds)
+    print(pads)
 
     nchans = int( (freq_hi - freq_lo) / df ) + 1
     freqs = freq_lo + np.arange(nchans) * df 
@@ -526,8 +574,13 @@ def combine_convert_fil2psrfits(filfiles, outname, npsub=-1, maxpol=4):
     #""" 
     # Create and initialize the PSRFITS file 
     print("Initializing PSRFITS file")
-    initialize_psrfits(outname, nsamps, nchans, nifs_out, nbits, 
-	               npsub=npsub, src_name=src_name, 
+    #initialize_psrfits(outname, nsamps, nchans, nifs_out, nbits, 
+    #                   npsub=npsub, src_name=src_name, 
+    #                   ra_str=src_raj, dec_str=src_dej, 
+    #                   mjd_start=mjd_start, dt=dt, 
+    #                   freq_lo=freq_lo, chan_df=df)
+    initialize_psrfits(outname, nsamps, nchans, nifs_out, outbits, 
+                       npsub=npsub, src_name=src_name, 
                        ra_str=src_raj, dec_str=src_dej, 
                        mjd_start=mjd_start, dt=dt, 
                        freq_lo=freq_lo, chan_df=df)
@@ -550,6 +603,7 @@ def combine_convert_fil2psrfits(filfiles, outname, npsub=-1, maxpol=4):
 
         # Set up some info for this filfile
         hdr_size_ii = hdr_sizes[ii]
+        pad_ii = pads[ii]
         fmin, fmax = get_min_max_freqs(hd_list[ii]) 
         nchans_ii = nchan_vals[ii]
         foff_ii  = foffs[ii]
@@ -566,10 +620,24 @@ def combine_convert_fil2psrfits(filfiles, outname, npsub=-1, maxpol=4):
     	# Open fil file and skip header
     	f = open(filfile)
     	f.seek(hdr_size_ii, os.SEEK_SET)  
-    	
+    
+	if inbits == 8:
+	   in_dtype='uint8'
+        elif inbits == 16:
+           in_dtype='uint16'
+        elif inbits == 32:
+           in_dtype='float32'
+        else:
+           print("Don't know what to do with %d bytes" %inbits)	
+           in_dtype='float32'
+
+	print("in_dtype = %s" %(in_dtype))
+
 	# Loop through chunks of data to write to PSRFITS
     	n_read_subints = 10
     	for istart in np.arange(0, Nsub, n_read_subints):
+            print("istart = %d" %(istart))
+            print("pad_ii = %d" %(pad_ii))
             print("(%d/%d) -- %d/%d" %(ii+1, len(filfiles), istart, Nsub))
             istop = istart + n_read_subints
             if istop > Nsub:
@@ -577,10 +645,28 @@ def combine_convert_fil2psrfits(filfiles, outname, npsub=-1, maxpol=4):
             else:
                 pass
             isub = istop - istart  
-            
+          
             # Read in nread samples from filfile
-            nread = isub * nchans_ii * nifs * npsub 
-            dd = np.fromfile(f, dtype='uint8', count=nread)
+            if (pad_ii > 0 and istart == 0):
+                read_spec = isub * npsub - pad_ii
+            else:
+                read_spec = isub * npsub
+            nread = read_spec * nchans_ii * nifs 
+            dd = np.fromfile(f, dtype=in_dtype, count=nread).astype('float32')
+
+            # Front pad zeros if pad_ii > 0
+            if (pad_ii > 0 and istart == 0):
+                pad_front = np.zeros( pad_ii * nchans_ii * nifs )
+                dd = np.hstack( (pad_front, dd) )
+            else: pass
+
+            # End pad zeros if len(dd) < isub * npsub * nifs * nchans_ii
+            nvals = isub * npsub * nifs * nchans_ii
+            if len(dd) < nvals:
+                pad_back = np.zeros( nvals - len(dd)  )
+                dd = np.hstack( (dd, pad_back) )
+            else: pass
+            
             dd = np.reshape(dd, (isub, npsub, nifs, nchans_ii))
 
 	    dd = dd[:, :, :nifs_out, :]
@@ -677,9 +763,15 @@ def calc_stats_from_fits(fitsfile):
 
        dd = hdu.data[istart : istop]['data']
        ntsamps = dd.shape[0] * dd.shape[1]
+       nt_nz = np.sum( dd > 0 )
        nifs = dd.shape[2]
        nfreqs = dd.shape[3]
        dd = np.reshape(dd, (ntsamps, nifs, nfreqs))
+
+       if istart == 0:
+          Nt = np.zeros( (nifs, nfreqs), dtype='float32')
+       else:
+          pass
        
        if sum_d is None:
           sum_d = np.sum(dd, axis=0)
@@ -688,12 +780,18 @@ def calc_stats_from_fits(fitsfile):
           sum_d += np.sum(dd, axis=0)
           sum_d2 += np.sum(dd**2.0, axis=0)
 
-       Nt += ntsamps 
+       Nt_i = np.sum( (dd>0), axis=0 )
+
+       #Nt += ntsamps 
+       Nt += Nt_i
 
     hdulist.close()
-    
-    dmean = sum_d / float(Nt)
-    dsig  = np.sqrt(Nt * sum_d2 - sum_d**2.0) / float(Nt)
+   
+    xx = np.where(Nt == 0) 
+    dmean = sum_d / Nt
+    dsig  = np.sqrt(Nt * sum_d2 - sum_d**2.0) / Nt
+    dmean[xx] = 0
+    dsig[xx] = 1
     return dmean, dsig
 
 
@@ -702,7 +800,6 @@ def meansub_and_mask(fitsfile, means, mask):
     hdulist = fits.open(fitsfile, mode='update')
     hdu = hdulist[1]
     Nsub = len(hdu.data[:]['data'])
-    Nsub = 20
     # Loop through chunks of data to write to PSRFITS
     n_read_subints = 10
     for istart in np.arange(0, Nsub, n_read_subints):
@@ -716,8 +813,12 @@ def meansub_and_mask(fitsfile, means, mask):
         
         # Put data in hdu data array
         dd = hdu.data[istart:istop]['data']
-	dd -= means
-	dd *= mask
+        xx = np.where(dd > 0)
+        if len(xx):
+           dd[xx] -= means
+	   dd[xx] *= mask
+        else:
+           pass
         # Write to file
         hdulist.flush()
 
@@ -734,11 +835,11 @@ def bandpass_and_mask(fitsfile, means, maskchans):
 
     # Turn means to scales
     # Note -- means should have shape (Nifs, Nchans)
-    rescale_val = 16.0
+    rescale_val = 1.0
     xx = np.where(means <= 0)
     scales = rescale_val / means
     if len(xx):
-       scales[xx] = 0
+       scales[xx] = 0.0
     else:
        pass
 
@@ -759,7 +860,7 @@ def bandpass_and_mask(fitsfile, means, maskchans):
         # Put data in hdu data array
         dd = hdu.data[istart:istop]['data'].astype('float')
 	dd *= scales 
-        hdu.data[istart:istop]['data'] = dd.astype('uint8')
+        hdu.data[istart:istop]['data'] = dd #dd.astype('uint8')
          
         # Write to file
         hdulist.flush()
@@ -800,7 +901,7 @@ def multi_fil2fits(scans, outbase, fil_dir, spw_chan, mask_edge=1,
                   npsub=-1, maxpol=4, fill_fits=True, 
                   calc_stat=True, bpass=True):
     for scan in scans:
-	glob_str = "%s/17B-283*.%d.1.[AB][CD].fil" %(fil_dir, scan)
+	glob_str = "%s/*.%d.1.[AB][CD]*.fil" %(fil_dir, scan)
 	filfiles = glob.glob(glob_str)
 	print(filfiles)
 	if len(filfiles) == 0:
@@ -808,12 +909,102 @@ def multi_fil2fits(scans, outbase, fil_dir, spw_chan, mask_edge=1,
 	    return
 	else: pass
 	
-	outname = "%s_%d" %(outbase, scan)
+	outname = "%s_%03d" %(outbase, scan)
 	fil2fits_full(filfiles, outname, spw_chan, mask_edge=mask_edge, 
                   npsub=npsub, maxpol=maxpol, fill_fits=fill_fits, 
 		  calc_stat=calc_stat, bpass=bpass)
     return
 
+
+def get_scans(fildir):
+    glob_str = "%s/*fil" %(fildir)
+    filfiles = glob.glob(glob_str)
+    scans = []
+    for filfile in filfiles:
+        fname = filfile.split('/')[-1]
+        num = int( fname.split('.')[-4] )
+        scans.append(num)
+    scans.sort()
+    return scans
+
+
+## GET STATS + FLAGGING ##
+def get_global_stats(dd, frac=0.80):
+    """
+    Get the mean and standard deviation 
+    from dd using all data that is non-zero 
+    (ie, not flagged) and falls within the 
+    middle frac (80%) of the distribution
+
+    The idea is to remove any extreme outliers 
+    for calculation of the mean and standard 
+    deviation (mostly for the latter)
+    """
+    ddr = dd.ravel()
+    ddr = ddr[ np.abs(ddr) > 0 ]
+    ddr_sort = np.sort(ddr)
+    N = len(ddr_sort)
+
+    f_lo = 0.5 * (1.0 - frac)
+    f_hi = 0.5 * (1.0 + frac)
+    fslice = slice( int(f_lo * N), int(f_hi * N) )
+    fmean = np.mean(ddr_sort[fslice])
+    fstd  = np.std(ddr_sort[fslice])
+
+    return fmean, fstd
+
+
+def flag_drops(dd, dmean, dsig, nsig=8):
+    xx = np.where( dd < -1.0 * nsig * dsig)
+    dd[xx] = 0
+    return dd
+
+
+def mask_drops(fitsfile, nsig=8):
+    # Open PSRFITS file 
+    hdulist = fits.open(fitsfile, mode='update')
+    hdu = hdulist[1]
+    Nsub = len(hdu.data[:]['data'])
+    # Loop through chunks of data to write to PSRFITS
+    n_read_subints = 10
+    for istart in np.arange(0, Nsub, n_read_subints):
+        print("%d/%d" %(istart, Nsub))
+        istop = istart + n_read_subints
+        if istop > Nsub:
+            istop = Nsub
+        else:
+            pass
+        isub = istop - istart
+
+        # Put data in hdu data array
+        dd = hdu.data[istart:istop]['data']
+        
+	if len(dd.shape) == 4:
+	   for ii in range(dd.shape[2]):
+               dm_i, ds_i = get_global_stats(dd[:, :, ii, :])
+               flag_drops(dd[:, :, ii, :], dm_i, ds_i, nsig=nsig)
+        else:
+           dm_i, ds_i = get_global_stats(dd)
+           flag_drops(dd, dm_i, ds_i, nsig=nsig)
+	
+	# Write to file
+        hdulist.flush()
+
+    hdulist.close()
+    return
+
+
 if __name__ == "__main__":
-    
-    pass
+    maxpol= 2
+    spw_chan = 64
+    mask_edge = 4
+
+    fil_dir = "/beegfsBN/scintillometry/J1745_VLA/bp198/bp198a/fil"
+    gstr = "BP198_sb32408243_1.57577.18682890046.8846.J1745-2900."
+    #filfiles = glob.glob("%s/%s*fil" %(fil_dir, gstr))
+    #fil2fits_full(filfiles, "bp198a", 64, mask_edge=4, maxpol=2)
+    scans = get_scans(fil_dir)
+    uscans = np.unique(scans)
+    uscans -= np.min(uscans)
+    print(uscans)
+   
