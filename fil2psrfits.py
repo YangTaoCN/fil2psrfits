@@ -3,6 +3,7 @@ from astropy.io import fits
 import astropy.time as atime
 import astropy.coordinates as acoord
 import astropy.units as aunits
+import argparse
 import fill_headers as fillhdr
 import sigproc
 import os
@@ -136,8 +137,8 @@ def initialize_psrfits(head, outname, nsamps, nchans, nifs, nbits, npsub=-1,
                        mjd_start=0.0, dt=0.001, freq_lo=1400.0, chan_df=1.0,
                        beam_info=np.array([0.0, 0.0, 0.0])):
     """
-    Set up a PSRFITS file with everything set up EXCEPT 
-    the DATA.  We want to be able to add the data in later        
+    Set up a PSRFITS file with everything set up EXCEPT
+    the DATA.  We want to be able to add the data in later
     """
     # Obs Specific Metadata
     # Time Info
@@ -192,8 +193,8 @@ def initialize_psrfits(head, outname, nsamps, nchans, nifs, nbits, npsub=-1,
     d.telescope = head['telescope']
 
     # Reshape data array
-    #data = data[: n_per_subint * n_subints]
-    #data = data.reshape( (n_subints, n_per_subint * nchans) )
+    # data = data[: n_per_subint * n_subints]
+    # data = data.reshape( (n_subints, n_per_subint * nchans) )
     data = np.array([])
 
     tstart = 0.0
@@ -380,8 +381,8 @@ def get_good_mjdstart(mjds, dt, ftol=0.01):
 
 def start_pads(mjds, mjd_start, dt):
     """
-    Calculate the number of time samples 
-    we need to pad 
+    Calculate the number of time samples
+    we need to pad
     """
     off_sec = (mjds - mjd_start) * 3600 * 24
     off_samps = np.round(off_sec / dt).astype('int')
@@ -474,7 +475,7 @@ def check_headers_and_get_info(hd_list):
         start_sec = (mjd_arr - np.floor(mjd_arr)) * 3600 * 24.
         stop_sec = start_sec + nsamps_arr * dt_arr[0]
         nsamp = (np.max(stop_sec) - np.min(start_sec)) / dt_arr[0]
-        #err_code += 10**0
+        # err_code += 10**0
         hd_out['nspec'] = int(np.round(nsamp))
     else:
         hd_out['nspec'] = np.unique(nsamps_arr)[0]
@@ -680,7 +681,7 @@ def combine_convert_fil2psrfits(filfiles, outname, npsub=-1, maxpol=4):
 
         # If foff is negative, we need to flip the freq axis
         if foff_ii < 0:
-            #print("Flipping band")
+            # print("Flipping band")
             dd = dd[:, :, :, ::-1]
         else:
             pass
@@ -791,7 +792,7 @@ def calc_stats_from_fits(fitsfile):
 
         Nt_i = np.sum((dd > 0), axis=0)
 
-        #Nt += ntsamps
+        # Nt += ntsamps
         Nt += Nt_i
 
     hdulist.close()
@@ -840,7 +841,7 @@ def bandpass_and_mask(fitsfile, means, maskchans):
     hdulist = fits.open(fitsfile, mode='update')
     hdu = hdulist[1]
     Nsub, npblk, nifs, nchans = hdu.data[:]['data'].shape
-    #Nsub = 20
+    # Nsub = 20
 
     # Turn means to scales
     # Note -- means should have shape (Nifs, Nchans)
@@ -942,13 +943,13 @@ def get_scans(fildir):
 ## GET STATS + FLAGGING ##
 def get_global_stats(dd, frac=0.80):
     """
-    Get the mean and standard deviation 
-    from dd using all data that is non-zero 
-    (ie, not flagged) and falls within the 
+    Get the mean and standard deviation
+    from dd using all data that is non-zero
+    (ie, not flagged) and falls within the
     middle frac (80%) of the distribution
 
-    The idea is to remove any extreme outliers 
-    for calculation of the mean and standard 
+    The idea is to remove any extreme outliers
+    for calculation of the mean and standard
     deviation (mostly for the latter)
     """
     ddr = dd.ravel()
@@ -1005,18 +1006,38 @@ def mask_drops(fitsfile, nsig=8):
     return
 
 
-if __name__ == "__main__":
+def main():
     maxpol = 2
     spw_chan = 64
     mask_edge = 4
 
-    # fil_dir = "/home/jovyan/work/shared/"
-    # #gstr = "BP198_sb32408243_1.57577.18682890046.8846.J1745-2900."
-    # #filfiles = glob.glob("%s/%s*fil" %(fil_dir, gstr))
-    # #fil2fits_full(filfiles, "bp198a", 64, mask_edge=4, maxpol=2)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path",
+                        help="The path of filterbank file or folder",
+                        type=str)
+    parser.add_argument("-g",
+                        "--gstr",
+                        help="filename filter with string",
+                        type=str)
+    args = parser.parse_args()
+    gstr = args.gstr
+    fil_dir = args.path
+    if not os.path.exists(fil_dir):
+        raise FileExistsError("File does not exists...")
+    elif (os.path.isfile(fil_dir)):
+        if fil_dir.endswith('.fil'):
+            output = fil_dir[:-4]
+            convert_fil2psrfits(fil_dir, output)
+        else:
+            print("Not filterbank file? suffix error...")
+    else:
+        filfiles = glob.glob("%s/%s*fil" % (fil_dir, gstr))
+        fil2fits_full(filfiles, "bp198a", 64, mask_edge=4, maxpol=2)
+
     # scans = get_scans(fil_dir)
     # uscans = np.unique(scans)
-    # #uscans -= np.min(uscans)
+    # uscans -= np.min(uscans)
     # print(uscans)
-    convert_fil2psrfits("../ds4096_B0833-45_A2_singlepulse_20190810_102839.fil",
-                        "../ds4096_B0833-45_A2_singlepulse_20190810_102839")
+
+if __name__ == "__main__":
+    main()
